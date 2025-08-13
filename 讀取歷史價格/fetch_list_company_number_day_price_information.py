@@ -4,6 +4,7 @@ import os
 import time
 import random
 from datetime import datetime
+from dateutil.relativedelta import relativedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
@@ -50,44 +51,49 @@ def safe_get(url, headers, retries=3, delay=2):
             else:
                 raise e
 
-# === 抓取單一股票資料 ===
+# === 抓取單一股票半年資料 ===
 def fetch_twse_stock(code: str):
     time.sleep(random.uniform(1.0, 2.0))  # 啟動前延遲
 
     output_path = os.path.join(SAVE_DIR, f"{code}.csv")
     existing_df = pd.read_csv(output_path, encoding="utf-8-sig") if os.path.exists(output_path) else pd.DataFrame()
 
-    now = datetime.now()
-    date_str = now.strftime("%Y%m%d")
-    url = f"https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY?date={date_str}&stockNo={code}&response=json"
+    all_rows = []
+    today = datetime.now()
 
-    try:
-        res = safe_get(url, get_random_headers())
-        json_data = res.json()
+    # 往前抓取 6 個月
+    for i in range(6):
+        target_date = today - relativedelta(months=i)
+        date_str = target_date.strftime("%Y%m%d")
+        url = f"https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY?date={date_str}&stockNo={code}&response=json"
 
-        if json_data.get("stat") != "OK":
-            print(f"⚠️ [{code}] 無法取得資料，stat={json_data.get('stat')}")
-            return
+        try:
+            res = safe_get(url, get_random_headers())
+            json_data = res.json()
 
-        data = json_data.get("data", [])
-        if not data:
-            print(f"⚠️ [{code}] 無資料")
-            return
+            if json_data.get("stat") != "OK":
+                continue
 
-        # 欄位轉換與計算
-        rows = []
-        for item in data:
-            date_val = item[0]  # 日期
-            volume = int(item[1].replace(",", ""))  # 成交股數
-            amount = int(item[2].replace(",", ""))  # 成交金額
-            high = float(item[4].replace(",", ""))  # 最高價
-            low = float(item[5].replace(",", ""))   # 最低價
-            avg_price = round(amount / volume, 2) if volume else 0
-            trades = int(item[8].replace(",", ""))  # 成交筆數
+            data = json_data.get("data", [])
+            for item in data:
+                date_val = item[0]  # 日期
+                volume = int(item[1].replace(",", ""))  # 成交股數
+                amount = int(item[2].replace(",", ""))  # 成交金額
+                high = float(item[4].replace(",", ""))  # 最高價
+                low = float(item[5].replace(",", ""))   # 最低價
+                avg_price = round(amount / volume, 2) if volume else 0
+                trades = int(item[8].replace(",", ""))  # 成交筆數
 
-            rows.append([date_val, volume, amount, high, low, avg_price, trades])
+                all_rows.append([date_val, volume, amount, high, low, avg_price, trades])
 
-        df = pd.DataFrame(rows, columns=["日期", "成交股數", "成交金額", "成交最高", "成交最低", "成交均價", "成交筆數"])
+        except Exception as e:
+            print(f"⚠️ [{code}] 抓取 {target_date.strftime('%Y-%m')} 失敗: {e}")
+
+        time.sleep(random.uniform(1.0, 1.5))  # 每月請求間延遲
+
+    # 建立 DataFrame
+    if all_rows:
+        df = pd.DataFrame(all_rows, columns=["日期", "成交股數", "成交金額", "成交最高", "成交最低", "成交均價", "成交筆數"])
 
         # 合併舊資料並去重
         if not existing_df.empty:
@@ -98,11 +104,9 @@ def fetch_twse_stock(code: str):
 
         # 儲存
         df.to_csv(output_path, index=False, encoding="utf-8-sig")
-        print(f"✅ [{code}] 資料已更新，共 {len(df)} 筆")
-    except Exception as e:
-        print(f"❌ [{code}] 抓取失敗: {e}")
-
-    time.sleep(random.uniform(1.0, 1.5))  # 請求間延遲
+        print(f"✅ [{code}] 半年資料已更新，共 {len(df)} 筆")
+    else:
+        print(f"⚠️ [{code}] 半年內無資料")
 
 # === 包裝函式給執行緒使用 ===
 def fetch_task(code):
@@ -119,7 +123,7 @@ if __name__ == "__main__":
     MAX_WORKERS = 2
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(fetch_task, code): code for code in stock_codes}
-        with tqdm(total=len(stock_codes), desc="上市股票進度") as pbar:
+        with tqdm(total=len(stock_codes), desc="上市股票半年資料進度") as pbar:
             for future in as_completed(futures):
                 try:
                     future.result()
