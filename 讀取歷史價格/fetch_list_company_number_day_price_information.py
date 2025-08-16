@@ -4,8 +4,6 @@ import os
 import time
 import random
 from datetime import datetime
-from dateutil.relativedelta import relativedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
 # === 路徑設定 ===
@@ -32,17 +30,17 @@ def read_stock_codes():
 # === 隨機 header ===
 def get_random_headers():
     return {
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Referer": "https://www.tpex.org.tw/zh-tw/mainboard/trading/info/stock-pricing.html",
         "User-Agent": random.choice(USER_AGENTS),
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Referer": "https://www.twse.com.tw/zh/trading/historical/stock-day.html",
-        "X-Requested-With": "XMLHttpRequest"
+        "X-Requested-With": "XMLHttpRequest",
     }
 
-# === 請求封裝，帶 retry ===
-def safe_get(url, headers, retries=3, delay=2):
+# === 請求封裝 ===
+def safe_post(url, headers, data, retries=3, delay=2):
     for attempt in range(retries):
         try:
-            res = requests.get(url, headers=headers, timeout=10)
+            res = requests.post(url, headers=headers, data=data, timeout=10)
             res.raise_for_status()
             return res
         except Exception as e:
@@ -51,68 +49,84 @@ def safe_get(url, headers, retries=3, delay=2):
             else:
                 raise e
 
-# === 抓取單一股票半年資料 ===
-def fetch_twse_stock(code: str):
-    time.sleep(random.uniform(1.0, 2.0))  # 啟動前延遲
-
+# === 抓取單一股票資料（半年內） ===
+def fetch_tpex_stock(code: str, start_roc_year: int, start_month: int, months: int = 6):
     output_path = os.path.join(SAVE_DIR, f"{code}.csv")
     existing_df = pd.read_csv(output_path, encoding="utf-8-sig") if os.path.exists(output_path) else pd.DataFrame()
 
-    all_rows = []
-    today = datetime.now()
+    url = "https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock"
+    fields = None
 
-    # 往前抓取 6 個月
-    for i in range(6):
-        target_date = today - relativedelta(months=i)
-        date_str = target_date.strftime("%Y%m%d")
-        url = f"https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY?date={date_str}&stockNo={code}&response=json"
+    # 準備已存在的月份 (YYYY-MM 格式)
+    existing_months = set()
+    if not existing_df.empty:
+        date_col = existing_df.columns[0]  # 假設第一欄就是日期
+        try:
+            existing_df[date_col] = pd.to_datetime(existing_df[date_col], errors="coerce")
+            existing_months = set(existing_df[date_col].dropna().dt.strftime("%Y-%m"))
+        except Exception as e:
+            print(f"⚠️ [{code}] 日期格式轉換失敗: {e}")
+
+    for i in range(months):
+        month_offset = start_month - i
+        year_offset = start_roc_year
+        if month_offset <= 0:
+            month_offset += 12
+            year_offset -= 1
+
+        y = year_offset + 1911
+        ym_str = f"{y}-{month_offset:02d}"  # 用來判斷是否已存在
+        date_str = f"{y}/{month_offset:02d}/01"
+
+        # 如果該年月已存在就跳過
+        if ym_str in existing_months:
+            continue
+
+        payload = {"code": code, "date": date_str, "id": ""}
+        headers = get_random_headers()
 
         try:
-            res = safe_get(url, get_random_headers())
+            res = safe_post(url, headers=headers, data=payload)
             json_data = res.json()
+            table = json_data.get("tables", [{}])[0]
+            data = table.get("data", [])
+            fields = table.get("fields", []) if not fields else fields
 
-            if json_data.get("stat") != "OK":
-                continue
+            if data:
+                # 過濾掉含 "--" 的 row
+                filtered_data = [row for row in data if "--" not in row]
 
-            data = json_data.get("data", [])
-            for item in data:
-                date_val = item[0]  # 日期
-                volume = int(item[1].replace(",", ""))  # 成交股數
-                amount = int(item[2].replace(",", ""))  # 成交金額
-                high = float(item[4].replace(",", ""))  # 最高價
-                low = float(item[5].replace(",", ""))   # 最低價
-                avg_price = round(amount / volume, 2) if volume else 0
-                trades = int(item[8].replace(",", ""))  # 成交筆數
+                if filtered_data:
+                    month_df = pd.DataFrame(filtered_data, columns=fields)
+                    existing_df = pd.concat([existing_df, month_df], ignore_index=True)
+                    existing_df.drop_duplicates(inplace=True)
 
-                all_rows.append([date_val, volume, amount, high, low, avg_price, trades])
-
+                    # 更新 existing_months，避免重複請求
+                    date_col = existing_df.columns[0]
+                    existing_df[date_col] = pd.to_datetime(existing_df[date_col], errors="coerce")
+                    existing_months = set(existing_df[date_col].dropna().dt.strftime("%Y-%m"))
         except Exception as e:
-            print(f"⚠️ [{code}] 抓取 {target_date.strftime('%Y-%m')} 失敗: {e}")
+            print(f"⚠️ [{code}] 抓取 {ym_str} 失敗: {e}")
 
-        time.sleep(random.uniform(1.0, 1.5))  # 每月請求間延遲
+        # 每次請求後延遲 3 秒
+        time.sleep(3)
 
-    # 建立 DataFrame
-    if all_rows:
-        df = pd.DataFrame(all_rows, columns=["日期", "成交股數", "成交金額", "成交最高", "成交最低", "成交均價", "成交筆數"])
-
-        # 合併舊資料並去重
-        if not existing_df.empty:
-            df = pd.concat([existing_df, df], ignore_index=True).drop_duplicates(subset=["日期"], keep="last")
-
-        # 排序
-        df.sort_values(by="日期", ascending=False, inplace=True, ignore_index=True)
-
-        # 儲存
-        df.to_csv(output_path, index=False, encoding="utf-8-sig")
-        print(f"✅ [{code}] 半年資料已更新，共 {len(df)} 筆")
+    if not existing_df.empty:
+        date_col = existing_df.columns[0]
+        try:
+            existing_df[date_col] = pd.to_datetime(existing_df[date_col], errors="coerce")
+            existing_df = existing_df.sort_values(by=date_col, ascending=False, ignore_index=True)
+        except:
+            pass
+        existing_df.to_csv(output_path, index=False, encoding="utf-8-sig")
+        print(f"✅ [{code}] 資料已更新")
     else:
-        print(f"⚠️ [{code}] 半年內無資料")
+        print(f"⚠️ [{code}] 無資料")
 
-# === 包裝函式給執行緒使用 ===
-def fetch_task(code):
-    fetch_twse_stock(code)
+    # 每檔股票完成後，再延遲 3 秒
+    time.sleep(3)
 
-# === 主程式 ===
+# === 主程式（單執行緒 + 進度條）===
 if __name__ == "__main__":
     try:
         stock_codes = read_stock_codes()
@@ -120,13 +134,14 @@ if __name__ == "__main__":
         print(f"讀取股票代號失敗：{e}")
         exit(1)
 
-    MAX_WORKERS = 2
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(fetch_task, code): code for code in stock_codes}
-        with tqdm(total=len(stock_codes), desc="上市股票半年資料進度") as pbar:
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                except Exception as e:
-                    print(f"❌ [{futures[future]}] 執行失敗：{e}")
-                pbar.update(1)
+    now = datetime.now()
+    current_roc_year = now.year - 1911
+    current_month = now.month
+
+    with tqdm(total=len(stock_codes), desc="股票進度") as pbar:
+        for code in stock_codes:
+            try:
+                fetch_tpex_stock(code, current_roc_year, current_month, months=6)
+            except Exception as e:
+                print(f"❌ [{code}] 執行失敗：{e}")
+            pbar.update(1)
