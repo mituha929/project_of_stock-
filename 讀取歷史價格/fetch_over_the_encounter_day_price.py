@@ -55,7 +55,10 @@ def fetch_tpex_stock(code: str, start_roc_year: int, start_month: int, months: i
     time.sleep(random.uniform(1.0, 2.0))  # 起始隨機延遲
 
     output_path = os.path.join(SAVE_DIR, f"{code}.csv")
-    existing_df = pd.read_csv(output_path, encoding="utf-8-sig") if os.path.exists(output_path) else pd.DataFrame()
+    if os.path.exists(output_path):
+        existing_df = pd.read_csv(output_path, encoding="utf-8-sig")
+    else:
+        existing_df = pd.DataFrame()
 
     url = "https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock"
     fields = None
@@ -82,8 +85,33 @@ def fetch_tpex_stock(code: str, start_roc_year: int, start_month: int, months: i
 
             if data:
                 month_df = pd.DataFrame(data, columns=fields)
-                existing_df = pd.concat([existing_df, month_df], ignore_index=True)
-                existing_df.drop_duplicates(inplace=True)
+
+                # 轉換成西元日期
+                date_col = next((c for c in month_df.columns if "日" in c and "期" in c), None)
+                if date_col:
+                    def roc_to_ad(x):
+                        try:
+                            parts = x.split("/")
+                            roc_year = int(parts[0])
+                            return datetime(roc_year + 1911, int(parts[1]), int(parts[2]))
+                        except:
+                            return pd.NaT
+
+                    month_df["日期"] = month_df[date_col].astype(str).map(roc_to_ad)
+
+                    # 檢查是否有重複日期
+                    if not existing_df.empty and "日期" in existing_df.columns:
+                        new_dates = set(month_df["日期"].dropna())
+                        old_dates = set(pd.to_datetime(existing_df["日期"], errors="coerce").dropna())
+                        unique_df = month_df[~month_df["日期"].isin(old_dates)]
+                    else:
+                        unique_df = month_df
+
+                    if not unique_df.empty:
+                        existing_df = pd.concat([existing_df, unique_df], ignore_index=True)
+                        print(f"➕ [{code}] 新增 {len(unique_df)} 筆資料")
+                    else:
+                        print(f"⏭️ [{code}] {date_str} 已存在，跳過")
 
         except Exception as e:
             print(f"⚠️ [{code}] 抓取 {year_offset}年{month_offset:02d} 月失敗: {e}")
@@ -91,27 +119,17 @@ def fetch_tpex_stock(code: str, start_roc_year: int, start_month: int, months: i
         time.sleep(random.uniform(1.0, 1.5))  # 請求後延遲
 
     if not existing_df.empty:
-        # 找出日期欄位
-        date_col = next((c for c in existing_df.columns if "日" in c and "期" in c), None)
-        if date_col:
-            # 民國年轉西元年
-            def roc_to_ad(x):
-                try:
-                    parts = x.split("/")
-                    roc_year = int(parts[0])
-                    return datetime(roc_year + 1911, int(parts[1]), int(parts[2]))
-                except:
-                    return pd.NaT
-
-            existing_df["日期"] = existing_df[date_col].astype(str).map(roc_to_ad)
+        # 日期排序
+        if "日期" in existing_df.columns:
+            existing_df["日期"] = pd.to_datetime(existing_df["日期"], errors="coerce")
             existing_df = existing_df.dropna(subset=["日期"])
             existing_df = existing_df.sort_values(by="日期", ascending=False, ignore_index=True)
 
-        # 輸出到 CSV
         existing_df.to_csv(output_path, index=False, encoding="utf-8-sig")
-        print(f"✅ [{code}] 資料已更新")
+        print(f"✅ [{code}] 資料已更新，總筆數 {len(existing_df)}")
     else:
         print(f"⚠️ [{code}] 無資料")
+
 
 # === 包裝函式 ===
 def fetch_task(code):

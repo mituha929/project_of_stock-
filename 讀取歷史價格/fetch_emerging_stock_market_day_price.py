@@ -100,13 +100,23 @@ def fetch_emerging_stock(code: str, start_roc_year: int, start_month: int, month
 
     if not existing_df.empty:
         try:
-            # 轉換日期方便排序（民國轉西元）
+            # 安全轉換民國日期 -> 西元日期
+            def roc_to_ad(x):
+                try:
+                    x = str(x).strip()
+                    if "/" not in x:
+                        return pd.NaT
+                    parts = x.split("/")
+                    roc_year = int(parts[0])
+                    return datetime(roc_year + 1911, int(parts[1]), int(parts[2]))
+                except:
+                    return pd.NaT
+
             df_tmp = existing_df.copy()
-            df_tmp["日期_sort"] = pd.to_datetime(
-                df_tmp["日期"].apply(lambda x: str(int(x.split("/")[0]) + 1911) + "/" + "/".join(x.split("/")[1:])),
-                errors="coerce"
-            )
+            df_tmp["日期_sort"] = df_tmp["日期"].map(roc_to_ad)
+            df_tmp = df_tmp.dropna(subset=["日期_sort"])  # 移除無效日期
             existing_df = df_tmp.sort_values(by="日期_sort", ascending=False).drop(columns=["日期_sort"]).reset_index(drop=True)
+
         except Exception as e:
             print(f"⚠️ 排序失敗：{e}")
 
@@ -114,6 +124,7 @@ def fetch_emerging_stock(code: str, start_roc_year: int, start_month: int, month
         print(f"✅ [{code}] 資料已更新，共 {len(existing_df)} 筆")
     else:
         print(f"⚠️ [{code}] 無資料")
+
 
 # === 包裝函式 ===
 def fetch_task(code):

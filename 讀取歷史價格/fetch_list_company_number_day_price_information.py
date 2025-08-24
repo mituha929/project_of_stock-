@@ -50,7 +50,7 @@ def safe_get(url, retries=3, delay=2):
                 raise e
 
 # === 抓取單一股票資料（半年內） ===
-def fetch_twse_stock(code: str, start_year: int, start_month: int, months: int = 6):
+def fetch_twse_stock(code: str, start_year: int, start_month: int, months: int = 12):
     output_path = os.path.join(SAVE_DIR, f"{code}.csv")
     existing_df = pd.read_csv(output_path, encoding="utf-8-sig") if os.path.exists(output_path) else pd.DataFrame()
 
