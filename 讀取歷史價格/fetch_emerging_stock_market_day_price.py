@@ -70,10 +70,6 @@ def fetch_emerging_stock(code: str, start_roc_year: int, start_month: int, month
         y = year_offset + 1911
         date_str = f"{y}/{month_offset:02d}/01"
 
-        # 檢查是否已存在該月份資料
-        if not existing_df.empty and existing_df["日期"].str.startswith(f"{year_offset:03d}/{month_offset:02d}").any():
-            continue
-
         payload = {"code": code, "date": date_str, "id": ""}
         headers = get_random_headers()
 
@@ -89,8 +85,13 @@ def fetch_emerging_stock(code: str, start_roc_year: int, start_month: int, month
                     [[row[0], row[1], row[2], row[3], row[4], row[5], row[6]] for row in data],
                     columns=columns_needed
                 )
-                existing_df = pd.concat([existing_df, month_df], ignore_index=True)
-                existing_df.drop_duplicates(inplace=True)
+
+                # 檢查日期是否已存在，避免重複
+                if not existing_df.empty and "日期" in existing_df.columns:
+                    month_df = month_df[~month_df["日期"].isin(existing_df["日期"])]
+
+                if not month_df.empty:
+                    existing_df = pd.concat([existing_df, month_df], ignore_index=True)
 
         except Exception as e:
             print(f"⚠️ [{code}] 抓取 {year_offset}年{month_offset:02d} 月失敗: {e}")
@@ -99,11 +100,18 @@ def fetch_emerging_stock(code: str, start_roc_year: int, start_month: int, month
 
     if not existing_df.empty:
         try:
-            existing_df = existing_df.sort_values(by="日期", ascending=False, ignore_index=True)
-        except:
-            pass
+            # 轉換日期方便排序（民國轉西元）
+            df_tmp = existing_df.copy()
+            df_tmp["日期_sort"] = pd.to_datetime(
+                df_tmp["日期"].apply(lambda x: str(int(x.split("/")[0]) + 1911) + "/" + "/".join(x.split("/")[1:])),
+                errors="coerce"
+            )
+            existing_df = df_tmp.sort_values(by="日期_sort", ascending=False).drop(columns=["日期_sort"]).reset_index(drop=True)
+        except Exception as e:
+            print(f"⚠️ 排序失敗：{e}")
+
         existing_df.to_csv(output_path, index=False, encoding="utf-8-sig")
-        print(f"✅ [{code}] 資料已更新")
+        print(f"✅ [{code}] 資料已更新，共 {len(existing_df)} 筆")
     else:
         print(f"⚠️ [{code}] 無資料")
 

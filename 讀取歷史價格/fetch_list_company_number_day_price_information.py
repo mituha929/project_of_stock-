@@ -31,16 +31,16 @@ def read_stock_codes():
 def get_random_headers():
     return {
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "Referer": "https://www.tpex.org.tw/zh-tw/mainboard/trading/info/stock-pricing.html",
+        "Referer": "https://www.twse.com.tw/zh/trading/historical/stock-day.html",
         "User-Agent": random.choice(USER_AGENTS),
         "X-Requested-With": "XMLHttpRequest",
     }
 
 # === 請求封裝 ===
-def safe_post(url, headers, data, retries=3, delay=2):
+def safe_get(url, retries=3, delay=2):
     for attempt in range(retries):
         try:
-            res = requests.post(url, headers=headers, data=data, timeout=10)
+            res = requests.get(url, timeout=10)
             res.raise_for_status()
             return res
         except Exception as e:
@@ -50,81 +50,93 @@ def safe_post(url, headers, data, retries=3, delay=2):
                 raise e
 
 # === 抓取單一股票資料（半年內） ===
-def fetch_tpex_stock(code: str, start_roc_year: int, start_month: int, months: int = 6):
+def fetch_twse_stock(code: str, start_year: int, start_month: int, months: int = 6):
     output_path = os.path.join(SAVE_DIR, f"{code}.csv")
     existing_df = pd.read_csv(output_path, encoding="utf-8-sig") if os.path.exists(output_path) else pd.DataFrame()
 
-    url = "https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock"
-    fields = None
+    url_template = "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY?date={date_str}&stockNo={code}&response=json"
 
     # 準備已存在的月份 (YYYY-MM 格式)
     existing_months = set()
     if not existing_df.empty:
         date_col = existing_df.columns[0]  # 假設第一欄就是日期
         try:
-            existing_df[date_col] = pd.to_datetime(existing_df[date_col], errors="coerce")
-            existing_months = set(existing_df[date_col].dropna().dt.strftime("%Y-%m"))
+            # 民國轉西元 (114/08/15 → 2025/08/15)
+            existing_df["日期_西元"] = pd.to_datetime(
+                existing_df[date_col].apply(lambda x: str(int(x.split("/")[0]) + 1911) + "/" + "/".join(x.split("/")[1:])),
+                format="%Y/%m/%d",
+                errors="coerce"
+            )
+            existing_months = set(existing_df["日期_西元"].dropna().dt.strftime("%Y-%m"))
         except Exception as e:
             print(f"⚠️ [{code}] 日期格式轉換失敗: {e}")
 
     for i in range(months):
         month_offset = start_month - i
-        year_offset = start_roc_year
+        year_offset = start_year
         if month_offset <= 0:
             month_offset += 12
             year_offset -= 1
 
-        y = year_offset + 1911
-        ym_str = f"{y}-{month_offset:02d}"  # 用來判斷是否已存在
-        date_str = f"{y}/{month_offset:02d}/01"
+        y = year_offset
+        ym_str = f"{y}-{month_offset:02d}"
+        date_str = f"{y}{month_offset:02d}01"
 
-        # 如果該年月已存在就跳過
         if ym_str in existing_months:
             continue
 
-        payload = {"code": code, "date": date_str, "id": ""}
-        headers = get_random_headers()
+        url = url_template.format(date_str=date_str, code=code)
 
         try:
-            res = safe_post(url, headers=headers, data=payload)
+            res = safe_get(url)
             json_data = res.json()
-            table = json_data.get("tables", [{}])[0]
-            data = table.get("data", [])
-            fields = table.get("fields", []) if not fields else fields
+            data = json_data.get("data", [])
+            fields = json_data.get("fields", [])
 
             if data:
-                # 過濾掉含 "--" 的 row
                 filtered_data = [row for row in data if "--" not in row]
 
                 if filtered_data:
                     month_df = pd.DataFrame(filtered_data, columns=fields)
+
+                    # 新增西元日期欄位，方便排序
+                    month_df["日期_西元"] = pd.to_datetime(
+                        month_df["日期"].apply(lambda x: str(int(x.split("/")[0]) + 1911) + "/" + "/".join(x.split("/")[1:])),
+                        format="%Y/%m/%d",
+                        errors="coerce"
+                    )
+
                     existing_df = pd.concat([existing_df, month_df], ignore_index=True)
                     existing_df.drop_duplicates(inplace=True)
 
-                    # 更新 existing_months，避免重複請求
-                    date_col = existing_df.columns[0]
-                    existing_df[date_col] = pd.to_datetime(existing_df[date_col], errors="coerce")
-                    existing_months = set(existing_df[date_col].dropna().dt.strftime("%Y-%m"))
+                    existing_months = set(existing_df["日期_西元"].dropna().dt.strftime("%Y-%m"))
         except Exception as e:
             print(f"⚠️ [{code}] 抓取 {ym_str} 失敗: {e}")
 
-        # 每次請求後延遲 3 秒
         time.sleep(3)
 
     if not existing_df.empty:
-        date_col = existing_df.columns[0]
         try:
-            existing_df[date_col] = pd.to_datetime(existing_df[date_col], errors="coerce")
-            existing_df = existing_df.sort_values(by=date_col, ascending=False, ignore_index=True)
-        except:
-            pass
+            # 用西元日期排序，從新到舊
+            existing_df = existing_df.sort_values(by="日期_西元", ascending=False, ignore_index=True)
+
+            # 轉回民國日期格式存檔
+            existing_df["日期"] = existing_df["日期_西元"].dt.strftime("%Y/%m/%d").apply(
+                lambda x: f"{int(x.split('/')[0]) - 1911}/{x.split('/')[1]}/{x.split('/')[2]}"
+            )
+
+            # 移除臨時的西元日期欄位
+            existing_df = existing_df.drop(columns=["日期_西元"])
+        except Exception as e:
+            print(f"⚠️ 排序或轉換民國日期失敗: {e}")
+
         existing_df.to_csv(output_path, index=False, encoding="utf-8-sig")
         print(f"✅ [{code}] 資料已更新")
     else:
         print(f"⚠️ [{code}] 無資料")
 
-    # 每檔股票完成後，再延遲 3 秒
     time.sleep(3)
+
 
 # === 主程式（單執行緒 + 進度條）===
 if __name__ == "__main__":
@@ -135,13 +147,13 @@ if __name__ == "__main__":
         exit(1)
 
     now = datetime.now()
-    current_roc_year = now.year - 1911
+    current_year = now.year
     current_month = now.month
 
     with tqdm(total=len(stock_codes), desc="股票進度") as pbar:
         for code in stock_codes:
             try:
-                fetch_tpex_stock(code, current_roc_year, current_month, months=6)
+                fetch_twse_stock(code, current_year, current_month, months=6)
             except Exception as e:
                 print(f"❌ [{code}] 執行失敗：{e}")
             pbar.update(1)

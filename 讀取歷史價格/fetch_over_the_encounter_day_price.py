@@ -13,7 +13,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(BASE_DIR, os.pardir))
 SAVE_DIR = os.path.join(PROJECT_ROOT, "data", "over_the_counter_data")
 os.makedirs(SAVE_DIR, exist_ok=True)
 
-# === 常見 User-Agent 清單（不要太怪，模擬一般瀏覽器）===
+# === 常見 User-Agent 清單 ===
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Safari/605.1.15",
@@ -37,7 +37,7 @@ def get_random_headers():
         "X-Requested-With": "XMLHttpRequest",
     }
 
-# === 請求封裝，帶 retry ===
+# === 請求封裝 ===
 def safe_post(url, headers, data, retries=3, delay=2):
     for attempt in range(retries):
         try:
@@ -46,14 +46,13 @@ def safe_post(url, headers, data, retries=3, delay=2):
             return res
         except Exception as e:
             if attempt < retries - 1:
-                time.sleep(delay * (attempt + 1))  # 遞增延遲
+                time.sleep(delay * (attempt + 1))
             else:
                 raise e
 
-# === 抓取單一股票資料（智慧快取版本） ===
+# === 抓取單一股票資料 ===
 def fetch_tpex_stock(code: str, start_roc_year: int, start_month: int, months: int = 12):
-    # 啟動前隨機延遲，降低被偵測頻率
-    time.sleep(random.uniform(1.0, 2.0))
+    time.sleep(random.uniform(1.0, 2.0))  # 起始隨機延遲
 
     output_path = os.path.join(SAVE_DIR, f"{code}.csv")
     existing_df = pd.read_csv(output_path, encoding="utf-8-sig") if os.path.exists(output_path) else pd.DataFrame()
@@ -70,12 +69,6 @@ def fetch_tpex_stock(code: str, start_roc_year: int, start_month: int, months: i
 
         y = year_offset + 1911
         date_str = f"{y}/{month_offset:02d}/01"
-
-        # 智慧快取：若已存在該月資料則跳過
-        if not existing_df.empty:
-            date_col = next((c for c in existing_df.columns if "日" in c and "期" in c), None)
-            if date_col and existing_df[date_col].str.startswith(f"{year_offset:03d}/{month_offset:02d}").any():
-                continue
 
         payload = {"code": code, "date": date_str, "id": ""}
         headers = get_random_headers()
@@ -95,22 +88,32 @@ def fetch_tpex_stock(code: str, start_roc_year: int, start_month: int, months: i
         except Exception as e:
             print(f"⚠️ [{code}] 抓取 {year_offset}年{month_offset:02d} 月失敗: {e}")
 
-        # 每次請求後隨機延遲
-        time.sleep(random.uniform(1.0, 1.5))
+        time.sleep(random.uniform(1.0, 1.5))  # 請求後延遲
 
     if not existing_df.empty:
+        # 找出日期欄位
         date_col = next((c for c in existing_df.columns if "日" in c and "期" in c), None)
         if date_col:
-            try:
-                existing_df = existing_df.sort_values(by=date_col, ascending=False, ignore_index=True)
-            except:
-                pass
+            # 民國年轉西元年
+            def roc_to_ad(x):
+                try:
+                    parts = x.split("/")
+                    roc_year = int(parts[0])
+                    return datetime(roc_year + 1911, int(parts[1]), int(parts[2]))
+                except:
+                    return pd.NaT
+
+            existing_df["日期"] = existing_df[date_col].astype(str).map(roc_to_ad)
+            existing_df = existing_df.dropna(subset=["日期"])
+            existing_df = existing_df.sort_values(by="日期", ascending=False, ignore_index=True)
+
+        # 輸出到 CSV
         existing_df.to_csv(output_path, index=False, encoding="utf-8-sig")
         print(f"✅ [{code}] 資料已更新")
     else:
         print(f"⚠️ [{code}] 無資料")
 
-# === 包裝函式給執行緒使用 ===
+# === 包裝函式 ===
 def fetch_task(code):
     now = datetime.now()
     current_roc_year = now.year - 1911
